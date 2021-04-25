@@ -9,6 +9,7 @@
 
 from std/math import floor, log10
 from std/strformat import fmt
+from sugar import `=>`
 
 import mersenne
 
@@ -62,7 +63,10 @@ type
   
   Arbitrary*[T] = object of RootObj
     ## arbitrary value generator for some type T
-    mgenerate: proc(a: Arbitrary[T], mrng: Random): Shrinkable[T]
+    ## XXX: eventually migrate to concepts once they're more stable, but
+    ##      language stability is the big reason for making this whole property
+    ##      based testing framework. :D
+    mgenerate: proc(a: Arbitrary[T], mrng: var Random): Shrinkable[T]
   
   Shrinkable*[T] = object
     ## future support for shrinking
@@ -102,7 +106,7 @@ proc isUnspecified(r: RunIdInternal): bool =
 
 proc newRun(): RunId = 1.RunId
 
-proc runComplete(r: var RunId): RunId =
+proc runComplete(r: var RunId): RunId {.discardable.} =
   ## marks the current run as complete and returns the preivous RunId
   result = r
   inc r
@@ -125,9 +129,12 @@ proc map[T, U](s: Shrinkable[T], mapper: proc(t: T): U): Shrinkable[U] =
 proc filter[T](s: Shrinkable[T], predicate: proc(t: T): bool): Shrinkable[T] =
   result = Shrinkable(value: predicate(s.value))
 
+proc shrinkableOf[T](v: T): Shrinkable[T] =
+  result = Shrinkable[T](value: v)
+
 #-- Arbitrary
 
-proc generate*[T](a: Arbitrary[T], mrng: Random): Shrinkable[T] =
+proc generate*[T](a: Arbitrary[T], mrng: var Random): Shrinkable[T] =
   ## calls the internal implementation
   a.mgenerate(a, mrng)
 
@@ -136,7 +143,7 @@ proc map*[T,U](a: Arbitrary[T], mapper: proc(t: T): U): Arbitrary[U] =
   ## XXX: constraining U by T isn't possible right now, need to fix generics
   let
     mgenerateOrig = a.mgenerate
-    mgenerate = proc(o: Arbirary[T], mrng: Random): Shrinkable[U] =
+    mgenerate = proc(o: Arbitrary[T], mrng: Random): Shrinkable[U] =
                   let f = cast[MapArbitrary[T, U]](o)
                   result = f.mgenerateOrig(o, mrng).map(f.mapper)
 
@@ -151,12 +158,12 @@ proc filter*[T](a: Arbitrary[T], predicate: proc(t: T): bool): Arbitrary[T] =
   ## to exhausted values.
   let
     mgenerateOrig = a.mgenerate
-    mgenerate = proc(o: Arbirary[T], mrng: Random): Shrinkable[U] =
-                  let f = cast[FilterArbitrary[T, U]](o)
+    mgenerate = proc(o: Arbitrary[T], mrng: Random): Shrinkable[T] =
+                  let f = cast[FilterArbitrary[T]](o)
                   var g = f.mgenerateOrig(o, mrng)
                   while not f.predicate(g.value):
                     g = f.mgenerateOrig(o, mrng)
-                  result = cast[Shrinkable[U]](g)
+                  result = cast[Shrinkable[T]](g)
 
   return FilterArbitrary(
     mgenerate: mgenerate,
@@ -167,25 +174,25 @@ proc filter*[T](a: Arbitrary[T], predicate: proc(t: T): bool): Arbitrary[T] =
 #-- Property
 
 proc newProperty*[T](arb: Arbitrary[T], p: Predicate): Property[T] =
-  result = Property(arb: arb, predicate: p)
+  result = Property[T](arb: arb, predicate: p)
 
 proc withBias[T](arb: Arbitrary[T], f: Frequency): Arbitrary[T] =
   ## create an arbitrary with bias
   ## XXX: implement biasing, 
   return arb
 
-proc generateAux[T](p: Property[T], mrng: Random,
+proc generateAux[T](p: Property[T], mrng: var Random,
                     r: RunIdInternal): Shrinkable[T] =
   result =
     if r.isUnspecified:
-      p.arb.withBias(runIdToFrequency(r)).generate(mrng)
-    else:
       p.arb.generate(mrng)
+    else:
+      p.arb.withBias(runIdToFrequency(r)).generate(mrng)
 
-proc generate*[T](p: Property[T], mrng: Random, runId: RunId): Shrinkable[T] =
+proc generate*[T](p: Property[T], mrng: var Random, runId: RunId): Shrinkable[T] =
   return generateAux(p, mrng, runId)
 
-proc generate*[T](p: Property[T], mrng: Random): Shrinkable[T] =
+proc generate*[T](p: Property[T], mrng: var Random): Shrinkable[T] =
   return generateAux(p, mrng, noRunId)
 
 proc run*[T](p: Property[T], v: T): PTStatus =
@@ -203,7 +210,10 @@ proc run*[T](p: Property[T], v: T): PTStatus =
 proc newRandom(seed: uint32 = 0): Random =
   Random(seed: seed, rng: newMersenneTwister(seed))
 
-#-- Check Properties
+proc nextInt(r: var Random): int =
+  result = cast[int32](r.rng.getNum())
+
+#-- Assert Properties
 
 type
   AssertParams* = object
@@ -231,12 +241,14 @@ proc defaultAssertParams(): AssertParams =
                         runsBeforeSuccess: 10)
 
 proc assertProperty*[T](p: Property[T], params: AssertParams = defaultAssertParams()): AssertReport =
+  ## run a property
   var
     runId = newRun()
+    rng = params.random # XXX: need a var version
   
-  while(runId <= params.runsBeforeSucces):
+  while(runId <= params.runsBeforeSuccess):
     let
-      s: Shrinkable[T] = p.generate(params.random, runId)
+      s: Shrinkable[T] = p.generate(rng, runId)
       r: PTStatus = p.run(s.value)
       didSucceed = r notin {ptFail, ptPreCondFail}
     
@@ -247,3 +259,18 @@ proc assertProperty*[T](p: Property[T], params: AssertParams = defaultAssertPara
   
   # XXX: if we made it this far assume it worked
   return true
+
+#-- Basic Arbitraries
+# these are so you can actually test a thing
+
+proc intArb(): Arbitrary[int] =
+  result = Arbitrary[int](
+    mgenerate: proc(arb: Arbitrary[int], rng: var Random): Shrinkable[int] =
+                  shrinkableOf(rng.nextInt())
+  )
+
+#-- Hackish Tests
+
+when isMainModule:
+  assertProperty[int](newProperty(intArb(), (i) => i > 0))
+  echo "foo"
