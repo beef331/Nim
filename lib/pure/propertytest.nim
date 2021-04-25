@@ -8,6 +8,7 @@
 #
 
 from std/math import floor, log10
+from std/strformat import fmt
 
 import mersenne
 
@@ -38,7 +39,7 @@ import mersenne
 ## * shrinking
 
 type
-  PTFailure* = enum
+  PTStatus* = enum
     ## the result of a single run/predicate check
     ## XXX: likely to be changed to a variant to support, true/false/error+data
     ptFail,
@@ -51,7 +52,7 @@ type
   RunIdInternal = int
    ## separate from `RunId` to support 0 value, indicating non-specified
   
-  Predicate*[T] = proc(s: T): PTFailure
+  Predicate*[T] = proc(s: T): PTStatus
     ## test function to see if a property holds
   
   Random* = object
@@ -101,7 +102,7 @@ proc isUnspecified(r: RunIdInternal): bool =
 
 proc newRun(): RunId = 1.RunId
 
-proc runComplete(var r: RunId): RunId =
+proc runComplete(r: var RunId): RunId =
   ## marks the current run as complete and returns the preivous RunId
   result = r
   inc r
@@ -187,7 +188,7 @@ proc generate*[T](p: Property[T], mrng: Random, runId: RunId): Shrinkable[T] =
 proc generate*[T](p: Property[T], mrng: Random): Shrinkable[T] =
   return generateAux(p, mrng, noRunId)
 
-proc run*[T](p: Property[T], v: T): PTFailure =
+proc run*[T](p: Property[T], v: T): PTStatus =
   try:
     result = p.predicate(v)
   except:
@@ -200,7 +201,6 @@ proc run*[T](p: Property[T], v: T): PTFailure =
 #-- Random Number Generation
 
 proc newRandom(seed: uint32 = 0): Random =
-  let seed = 1
   Random(seed: seed, rng: newMersenneTwister(seed))
 
 #-- Check Properties
@@ -210,9 +210,9 @@ type
     ## parameters for asserting properties
     ## XXX: add more params to control tests, eg:
     ##      * `examples` as a seq[T], for default values
-    seed*: int
+    seed*: uint32
     random*: Random
-    runsBeforeSuccess*: range[1..high(uint32)]
+    runsBeforeSuccess*: range[1..high(int)]
 
   AssertRun* = object
     ## state for a runnable or running property assertion
@@ -226,7 +226,7 @@ type
     # XXX: complete me
 
 proc defaultAssertParams(): AssertParams =
-  let seed = 1
+  let seed: uint32 = 1
   result = AssertParams(seed: seed, random: newRandom(seed),
                         runsBeforeSuccess: 10)
 
@@ -235,8 +235,15 @@ proc assertProperty*[T](p: Property[T], params: AssertParams = defaultAssertPara
     runId = newRun()
   
   while(runId <= params.runsBeforeSucces):
-    # if p.(params.random, runId):
-      # XXX: complete me
-
+    let
+      s: Shrinkable[T] = p.generate(params.random, runId)
+      r: PTStatus = p.run(s.value)
+      didSucceed = r notin {ptFail, ptPreCondFail}
+    
     runId.runComplete()
-  return
+
+    # XXX: this shouldn't be an doAssert like this, need a proper report
+    doAssert didSucceed, fmt"Fail({runId}): {r} - {s.value}"
+  
+  # XXX: if we made it this far assume it worked
+  return true
