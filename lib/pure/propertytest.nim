@@ -206,7 +206,12 @@ proc run*[T](p: Property[T], v: T): PTStatus =
     discard
 
 #-- Random Number Generation
-
+# XXX: the trick with rngs is that the number of calls to them matter, so we'll
+#      have to start tracking number of calls in between arbitrary generation
+#      other such things (well beyond just the seed) in order to quickly
+#      reproduce a failure. Additionally, different psuedo random number
+#      generation schemes are required because they have various distribution
+#      and performance characteristics which quickly become relevant at scale.
 proc newRandom(seed: uint32 = 0): Random =
   Random(seed: seed, rng: newMersenneTwister(seed))
 
