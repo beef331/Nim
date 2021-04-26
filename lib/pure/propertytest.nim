@@ -20,7 +20,58 @@ import std/options # need this for counter examples
 ## 
 ## :Author: Saem Ghani
 ##
-## This module implements property based testing facilities.
+## Current Development:
+## ====================
+## This module implements property based testing facilities. Like most nice
+## things there are two major parts of this module:
+## 1. core concepts of structured data generation, operations, & property tests
+## 2. the API by which the former is expressed
+## It's important not to conflate the two, the current way tests are executed
+## and reported upon is not relevant to the core as an example of this. Nor is
+## the composition of arbitraries, predicates, and random number generators.
+##
+## API Evolution:
+## --------------
+## The API needs evolving, in a few areas:
+## 1. definition of generators
+## 2. expression of properties
+## 
+## Generators: at the very least `chain` or `fmap` is likely required along
+## with a number of other combinators that allow for rapid definition of
+## generators. This is likely the most important on the road to being able to
+## generate AST allowing for rapidly testing languages features working in
+## combinations with each other. This should allow for exacting documentation
+## of a spec.
+##
+## Properties: something that provides some simple combinators that allow for:
+## `"some property is true" given arb1 & arb2 & arb3 when somePredicate(a,b,c)`
+## Where we have a nice textual description of a spec, declaration of
+## assumptions, and the predicate. More complex expressions such as given a
+## circumstance (textual + given), many properties predicates can be checked
+## including introducing further givens specific to the branch of properties.
+## To provide a cleaner API in most circumstances, an API that can take a
+## subset of `typedesc`s with associated default arbitraries would remove a lot
+## of noise with good defaults.
+## 
+## Core Evolution:
+## ---------------
+## Evolving the core has a number of areas, the most pressing:
+## 1. establishing a strong base of default arbitraries
+## 2. shrinking support
+## 3. replay failed path in run
+## 
+## Default Arbitraries: a strong base is required to feed NimNode generation so
+## valid ASTs can be generated quickly.
+## 
+## Shrinking: automatically generated programs will often contain a lot of
+## noise, a shrinking can do much to provide small failure demonstrating
+## scenarios.
+## 
+## Replay: when you can generate tests, test suites start taking longer very
+## quickly. This is of course a good thing, it's a relfection of the lowered
+## cost of rapidly exploring large areas of the input space. Being able to
+## re-run only a single failing run that otherwise only shows up towards the
+## end of a test battery quickly becomes important.
 ## 
 ## Heavily inspired by the excellent
 ## [Fast Check library](https://github.com/dubzzz/fast-check).
