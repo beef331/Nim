@@ -12,6 +12,8 @@ from std/strformat import fmt
 from std/sugar import `=>` # XXX: maybe a bust because inference can't keep up
 from std/algorithm import sort
 
+import std/[macros, sequtils]
+
 import std/mersenne
 import std/options # need this for counter examples
 
@@ -326,6 +328,16 @@ proc uint32Arb*(min, max: uint32): Arbitrary[uint32] =
                   shrinkableOf(min + (rng.nextUint32() mod size))
   )
 
+proc initArbitrary[T: tuple]: Arbitrary[T] = # Temporary procedure we need to figure out how to make for *all* types
+  let size = 100u32
+  result = Arbitrary[T](
+    mgenerate: proc(arb: Arbitrary[T], rng: var Random): Shrinkable[T] =
+      var a = default T
+      for field in a.fields:
+        field = rng.nextUint32() mod size
+  )
+
+
 proc charArb*(): Arbitrary[char] =
   result = uint32Arb(0, 255).map((i) => chr(cast[range[0..255]](i)))
 
@@ -401,26 +413,66 @@ proc defaultAssertParams(): AssertParams =
   result = AssertParams(seed: seed, random: newRandom(seed),
                         runsBeforeSuccess: 10)
 
-proc assertProperty*[T](arb: Arbitrary[T], pred: Predicate[T], 
-                        params: AssertParams = defaultAssertParams()
-                       ): AssertReport[T] =
+macro assertProperty*(name: string, values: varargs[typedesc], params = defaultAssertParams(), body: untyped): untyped =
+  ## Generates and runs a property
+  
+  let 
+    possibleIdents = {'a'..'z'}.toSeq
+    (unpackIdent, value) = block: # Generate the tuple, and the name unpack varaibles
+      var
+        val = nnkTupleConstr.newNimNode
+        idents: seq[NimNode]
+      for i, x in values:
+        val.add x
+        idents.add ident($possibleIdents[i])
+      (idents, val)
+    identDefs = [ident"PTStatus", newIdentDefs(ident"input", value)] # Passing tuple due to property[T]
+  
+  let unpackNode = nnkLetSection.newTree(nnkVarTuple.newTree(unpackIdent)) # make the `let (a, b ...) = input`
+  unpackNode[0].add newEmptyNode(), ident"input"
+  
+  body.insert 0, unpackNode # add unpacking to the first step
+
+  result = newStmtList()
+  result.add newProc(ident"test", identDefs, body) # Emit the proc
+  result.add quote do:
+    var
+      arb = initArbitrary[`value`]()
+      report = startReport[`value`](`name`)
+      rng = `params`.random
+      p = newProperty(arb, test)
+    while report.runId < `params`.runsBeforeSuccess:
+      report.startRun()
+      let
+        s: Shrinkable[`value`] = p.generate(rng, report.runId)
+        r: PTStatus = p.run(s.value)
+        didSucceed = r notin {ptfail, ptPreCondFail}
+      
+      if not didSucceed:
+        report.recordFailure(s.value, r)
+    echo report
+      
+  #echo result.repr
+
+
+
   ## run a property
-  var
-    report = startReport[T]()
-    rng = params.random # XXX: need a var version, but this might hurt replay
-    p = newProperty(arb, pred)
-  
-  while(report.runId < params.runsBeforeSuccess):
-    report.startRun()
-    let
-      s: Shrinkable[T] = p.generate(rng, report.runId)
-      r: PTStatus = p.run(s.value)
-      didSucceed = r notin {ptFail, ptPreCondFail}
-    
-    if not didSucceed:
-      report.recordFailure(s.value, r)
-  
-  result = report
+  #var
+  #  report = startReport[T]()
+  #  rng = params.random # XXX: need a var version, but this might hurt replay
+  #  p = newProperty(arb, pred)
+  #
+  #while(report.runId < params.runsBeforeSuccess):
+  #  report.startRun()
+  #  let
+  #    s: Shrinkable[T] = p.generate(rng, report.runId)
+  #    r: PTStatus = p.run(s.value)
+  #    didSucceed = r notin {ptFail, ptPreCondFail}
+  #  
+  #  if not didSucceed:
+  #    report.recordFailure(s.value, r)
+  #
+  #result = report
   # XXX: this shouldn't be an doAssert like this, need a proper report
   # doAssert didSucceed, fmt"Fail({runId}): {r} - {s.value}"
   
@@ -458,24 +510,22 @@ proc assertProperty*[A, B](
 
 when isMainModule:
   block:
-    let foo = proc(i: uint32): PTStatus =
-                case i >= 0
-                of true: ptPass
-                of false: ptFail
-    var arb = uint32Arb()
-    echo "uint32 are >= 0, yes it's silly ", assertProperty(arb, foo)
+    assertProperty("uint32 are >= 0, yes it's silly", uint32) do:
+      case a >= 0
+      of true: ptPass
+      of false: ptFail
 
-  block:
-    let
-      min: uint32 = 100000000
-      max = high(uint32)
-    echo fmt"uint32 within the range[{min}, {max}]"
-    let foo = proc(i: uint32): PTStatus =
-                case i >= min
-                of true: ptPass
-                of false: ptFail
-    var arb = uint32Arb(min, max)
-    echo assertProperty(arb, foo)
+  #block:
+  #  let
+  #    min: uint32 = 100000000
+  #    max = high(uint32)
+  #  echo fmt"uint32 within the range[{min}, {max}]"
+  #  let foo = proc(i: uint32): PTStatus =
+  #              case i >= min
+  #              of true: ptPass
+  #              of false: ptFail
+  #  var arb = uint32Arb(min, max)
+  #  echo assertProperty(arb, foo)
 
   block:
     echo "classic math assumption should fail"
