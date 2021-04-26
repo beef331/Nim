@@ -1,7 +1,7 @@
 #
 #
 #            Nim's Runtime Library
-#        (c) Copyright 2015 Nim Contributors
+#        (c) Copyright 2021 Nim Contributors
 #
 #    See the file "copying.txt", included in this
 #    distribution, for details about the copyright.
@@ -9,10 +9,11 @@
 
 from std/math import floor, log10
 from std/strformat import fmt
-from sugar import `=>`
-from algorithm import sort
+from std/sugar import `=>`
+from std/algorithm import sort
 
-import mersenne
+import std/mersenne
+import std/options # need this for counter examples
 
 ## XXX: Once this is good enough move this into the stdlib, for now mature in
 ##      the compiler
@@ -44,14 +45,14 @@ type
   PTStatus* = enum
     ## the result of a single run/predicate check
     ## XXX: likely to be changed to a variant to support, true/false/error+data
-    ptFail,
     ptPreCondFail,
+    ptFail,
     ptPass
 
   RunId* = range[1..high(int)]
     ## sequential id of the run, starts from 1
   
-  RunIdInternal = int
+  PossibleRunId* = int
    ## separate from `RunId` to support 0 value, indicating non-specified
   
   Predicate*[T] = proc(s: T): PTStatus
@@ -99,9 +100,9 @@ type
 
 #-- Run Id
 
-const noRunId = 0.RunIdInternal
+const noRunId = 0.PossibleRunId
 
-proc isUnspecified(r: RunIdInternal): bool =
+proc isUnspecified*(r: PossibleRunId): bool =
   ## used for default param handling
   result = r.uint == 0
 
@@ -185,9 +186,9 @@ proc withBias[T](arb: Arbitrary[T], f: Frequency): Arbitrary[T] =
   return arb
 
 proc generateAux[T](p: Property[T], mrng: var Random,
-                    r: RunIdInternal): Shrinkable[T] =
+                    r: PossibleRunId): Shrinkable[T] =
   result =
-    if r.isUnspecified:
+    if r.isUnspecified():
       p.arb.generate(mrng)
     else:
       p.arb.withBias(runIdToFrequency(r)).generate(mrng)
@@ -285,86 +286,138 @@ type
     random*: Random
     runsBeforeSuccess*: range[1..high(int)]
 
-  AssertRun* = object
-    ## state for a runnable or running property assertion
-    currentRun: RunIdInternal
+  RunExecution[T] = object
+    ## result of run execution
+    ## XXX: move to using this rather than open state in `assertProperty` procs
+    ## XXX: lots to do to finish this:
+    ##      * save necessary state for quick reproduction (path, etc)
+    ##      * support async and streaming (iterator? CPS? magical other thing?)
+    runId: uint32
+    failureOn: PossibleRunId
+    seed: uint32
+    counterExample: Option[T]
 
-  AssertReport* = bool
-  # AssertReport* = object
+  AssertReport*[T] = object
     ## result of a property assertion, with all runs information
-    ## XXX: support async and streaming (iterator? CPS? magical other thing?)
-    # path: string
-    # XXX: complete me
+    ## XXX: don't need counter example and generic param here once
+    ##      `RunExecution` is being used.
+    name: string ## XXX: populate me 
+    runId: PossibleRunId
+    failures: uint32
+    firstFailure: PossibleRunId
+    failureType: PTStatus
+    counterExample: Option[T]
+
+proc recordFailure*[T](r: var AssertReport[T], rid: RunId, example: Option[T],
+                    ft: PTStatus) =
+  ## records the failure in the report, and notes first failure and associated
+  ## counter-example as necessary
+  assert ft in {ptFail, ptPreCondFail}, fmt"invalid failure status: {ft}"
+  if r.firstFailure.isUnspecified():
+    r.firstFailure = rid
+    r.counterExample = example
+  inc r.failures
+  when defined(debug):
+    let exampleStr = $example.get() # XXX: handle non-stringable stuff
+    echo fmt"Fail({rid}): {ft} - {exampleStr}"
+
+proc hasFailure*(r: AssertReport): bool =
+  result = not r.failureOn.isUnspecified()
+
+proc `$`*[T](r: AssertReport): string =
+  # XXX: make this less ugly
+  result = fmt"name: {r.name}, totalRuns: {r.runId.int}, failures: {r.failures}, firstFailure: {r.firstFailure}, firstFailureType: {r.failureType}, counter-example: {r.counterExample}"
+
+proc startReport[T](name: string = ""): AssertReport[T] =
+  ## start a new report
+  result = AssertReport[T](name: name, runId: newRun(), failures: 0,
+                        firstFailure: noRunId, counterExample: none[T]())
 
 proc defaultAssertParams(): AssertParams =
   let seed: uint32 = 1
   result = AssertParams(seed: seed, random: newRandom(seed),
                         runsBeforeSuccess: 10)
 
-proc assertProperty*[T](arb: Arbitrary[T], pred: Predicate[T], params: AssertParams = defaultAssertParams()): AssertReport =
+proc assertProperty*[T](arb: Arbitrary[T], pred: Predicate[T], 
+                        params: AssertParams = defaultAssertParams()
+                       ): AssertReport[T] =
   ## run a property
+  var result = startReport[T]()
   var
-    runId = newRun()
-    rng = params.random # XXX: need a var version
+    rng = params.random # XXX: need a var version, but this might hurt replay
     p = newProperty(arb, pred)
   
-  while(runId <= params.runsBeforeSuccess):
+  while(result.runId <= params.runsBeforeSuccess):
     let
-      s: Shrinkable[T] = p.generate(rng, runId)
+      s: Shrinkable[T] = p.generate(rng, result.runId)
       r: PTStatus = p.run(s.value)
       didSucceed = r notin {ptFail, ptPreCondFail}
     
-    runId.runComplete()
-
-    # XXX: this shouldn't be an doAssert like this, need a proper report
-    doAssert didSucceed, fmt"Fail({runId}): {r} - {s.value}"
+    result.runId.runComplete()
+    if not didSucceed:
+      result.recordFailure(r, s.value)
+  # XXX: this shouldn't be an doAssert like this, need a proper report
+  # doAssert didSucceed, fmt"Fail({runId}): {r} - {s.value}"
   
   # XXX: if we made it this far assume it worked
-  return true
+  # return true
 
 proc assertProperty*[A, B](
   arb1: Arbitrary[A], arb2: Arbitrary[B],
   pred: Predicate[(A, B)],
-  params: AssertParams = defaultAssertParams()): AssertReport =
+  params: AssertParams = defaultAssertParams()): AssertReport[(A,B)] =
   ## run a property
+  result = startReport[(A, B)]()
   var
-    runId = newRun()
     rng = params.random # XXX: need a var version
     arb = tupleArb[A,B](arb1, arb2)
     p = newProperty(arb, pred)
   
-  while(runId <= params.runsBeforeSuccess):
+  while(result.runId <= params.runsBeforeSuccess):
     let
-      s: Shrinkable[(A,B)] = p.generate(rng, runId)
+      s: Shrinkable[(A,B)] = p.generate(rng, result.runId)
       r = p.run(s.value)
       didSucceed = r notin {ptFail, ptPreCondFail}
     
-    runId.runComplete()
+    result.runId.runComplete()
+    if not didSucceed:
+      result.recordFailure(r, s.value)
 
     # XXX: this shouldn't be an doAssert like this, need a proper report
-    doAssert didSucceed, fmt"Fail({runId}): {r} - {s.value}"
+    # doAssert didSucceed, fmt"Fail({runId}): {r} - {s.value}"
   
   # XXX: if we made it this far assume it worked
-  return true
+  # return true
 
 #-- Hackish Tests
 
 when isMainModule:
   block:
+    let foo = proc(i: uint32): PTStatus =
+                case i >= 0
+                of true: ptPass
+                of false: ptFail
+    var arb = uint32Arb()
+    # var prop = newProperty(arb, foo)
+    echo "uint32 are >= 0, yes it's silly", assertProperty(arb, foo)
+
+  block:
+    let
+      min: uint32 = 100000000
+      max = high(uint32)
+    echo fmt"uint32 within the range[{min}, {max}]"
+    let foo = proc(i: uint32): PTStatus =
+                case i >= min
+                of true: ptPass
+                of false: ptFail
+    var arb = uint32Arb(min, max)
+    echo assertProperty(arb, foo)
+
+  block:
+    echo "classic math assumption should fail"
     let foo = proc(t: ((uint32, uint32))): PTStatus =
                 let (a, b) = t
                 case a + b > a
                 of true: ptPass
                 of false: ptFail
     echo assertProperty(uint32Arb(), uint32Arb(), foo)
-    echo "false"
-
-  block:
-    var foo = proc(i: int): PTStatus =
-                case i > 0
-                of true: ptPass
-                of false: ptFail
-    var arb = intArb()
-    # var prop = newProperty(arb, foo)
-    echo assertProperty(arb, foo)
-    echo "first"
