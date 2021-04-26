@@ -108,9 +108,12 @@ proc isUnspecified*(r: PossibleRunId): bool =
 
 proc newRun(): RunId = 1.RunId
 
-proc runComplete(r: var RunId): RunId {.discardable.} =
+proc startRun(r: var RunId): RunId {.discardable, inline.} =
   ## marks the current run as complete and returns the preivous RunId
   result = r
+  inc r
+
+proc startRun(r: var PossibleRunId) {.inline.} =
   inc r
 
 proc runIdToFrequency(r: RunId): int =
@@ -308,29 +311,38 @@ type
     failureType: PTStatus
     counterExample: Option[T]
 
-proc recordFailure*[T](r: var AssertReport[T], rid: RunId, example: Option[T],
-                    ft: PTStatus) =
+proc startRun[T](r: var AssertReport[T]) {.inline.} =
+  r.runId.startRun()
+
+proc recordFailure[T](r: var AssertReport[T], example: T,
+                      ft: PTStatus) =
   ## records the failure in the report, and notes first failure and associated
   ## counter-example as necessary
   assert ft in {ptFail, ptPreCondFail}, fmt"invalid failure status: {ft}"
   if r.firstFailure.isUnspecified():
-    r.firstFailure = rid
-    r.counterExample = example
+    r.firstFailure = r.runId
+    r.counterExample = some(example)
   inc r.failures
   when defined(debug):
     let exampleStr = $example.get() # XXX: handle non-stringable stuff
-    echo fmt"Fail({rid}): {ft} - {exampleStr}"
+    echo fmt"Fail({r.runId}): {ft} - {exampleStr}"
 
 proc hasFailure*(r: AssertReport): bool =
-  result = not r.failureOn.isUnspecified()
+  result = not r.firstFailure.isUnspecified()
 
-proc `$`*[T](r: AssertReport): string =
+proc `$`*[T](r: AssertReport[T]): string =
   # XXX: make this less ugly
-  result = fmt"name: {r.name}, totalRuns: {r.runId.int}, failures: {r.failures}, firstFailure: {r.firstFailure}, firstFailureType: {r.failureType}, counter-example: {r.counterExample}"
+  let status =
+    if r.hasFailure:
+      fmt"failures: {r.failures}, firstFailure: {r.firstFailure}, firstFailureType: {r.failureType}, counter-example: {r.counterExample}"
+    else:
+      "status: success"
+
+  result = fmt"name: {r.name}, {status}, totalRuns: {r.runId.int}"
 
 proc startReport[T](name: string = ""): AssertReport[T] =
   ## start a new report
-  result = AssertReport[T](name: name, runId: newRun(), failures: 0,
+  result = AssertReport[T](name: name, runId: noRunId, failures: 0,
                         firstFailure: noRunId, counterExample: none[T]())
 
 proc defaultAssertParams(): AssertParams =
@@ -342,20 +354,22 @@ proc assertProperty*[T](arb: Arbitrary[T], pred: Predicate[T],
                         params: AssertParams = defaultAssertParams()
                        ): AssertReport[T] =
   ## run a property
-  var result = startReport[T]()
   var
+    report = startReport[T]()
     rng = params.random # XXX: need a var version, but this might hurt replay
     p = newProperty(arb, pred)
   
-  while(result.runId <= params.runsBeforeSuccess):
+  while(report.runId < params.runsBeforeSuccess):
+    report.startRun()
     let
-      s: Shrinkable[T] = p.generate(rng, result.runId)
+      s: Shrinkable[T] = p.generate(rng, report.runId)
       r: PTStatus = p.run(s.value)
       didSucceed = r notin {ptFail, ptPreCondFail}
     
-    result.runId.runComplete()
     if not didSucceed:
-      result.recordFailure(r, s.value)
+      report.recordFailure(s.value, r)
+  
+  result = report
   # XXX: this shouldn't be an doAssert like this, need a proper report
   # doAssert didSucceed, fmt"Fail({runId}): {r} - {s.value}"
   
@@ -373,15 +387,15 @@ proc assertProperty*[A, B](
     arb = tupleArb[A,B](arb1, arb2)
     p = newProperty(arb, pred)
   
-  while(result.runId <= params.runsBeforeSuccess):
+  while(result.runId < params.runsBeforeSuccess):
+    result.startRun()
     let
       s: Shrinkable[(A,B)] = p.generate(rng, result.runId)
       r = p.run(s.value)
       didSucceed = r notin {ptFail, ptPreCondFail}
     
-    result.runId.runComplete()
     if not didSucceed:
-      result.recordFailure(r, s.value)
+      result.recordFailure(s.value, r)
 
     # XXX: this shouldn't be an doAssert like this, need a proper report
     # doAssert didSucceed, fmt"Fail({runId}): {r} - {s.value}"
@@ -399,7 +413,7 @@ when isMainModule:
                 of false: ptFail
     var arb = uint32Arb()
     # var prop = newProperty(arb, foo)
-    echo "uint32 are >= 0, yes it's silly", assertProperty(arb, foo)
+    echo "uint32 are >= 0, yes it's silly ", assertProperty(arb, foo)
 
   block:
     let
