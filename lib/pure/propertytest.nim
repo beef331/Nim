@@ -9,7 +9,7 @@
 
 from std/math import floor, log10
 from std/strformat import fmt
-from std/sugar import `=>`
+from std/sugar import `=>` # XXX: maybe a bust because inference can't keep up
 from std/algorithm import sort
 
 import std/mersenne
