@@ -126,7 +126,7 @@ type
     value: T
 
   Property*[T] = object
-    ## condition an arbitrary set of values must hold, given a predicate
+    ## a condition that must hold for an arbitrary as specified by a predicate
     arb: Arbitrary[T]
     predicate: Predicate[T]
   
@@ -463,7 +463,6 @@ when isMainModule:
                 of true: ptPass
                 of false: ptFail
     var arb = uint32Arb()
-    # var prop = newProperty(arb, foo)
     echo "uint32 are >= 0, yes it's silly ", assertProperty(arb, foo)
 
   block:
