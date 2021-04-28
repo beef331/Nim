@@ -334,7 +334,7 @@ proc initArbitrary[T: tuple]: Arbitrary[T] = # Temporary procedure we need to fi
     mgenerate: proc(arb: Arbitrary[T], rng: var Random): Shrinkable[T] =
       var a = default T
       for field in a.fields:
-        field = rng.nextUint32() mod size
+        field = type(field)(rng.nextUint32() mod size)
   )
 
 
@@ -417,7 +417,7 @@ macro assertProperty*(name: string, values: varargs[typed], params = defaultAsse
   ## Generates and runs a property
   var tupleTyp = nnkTupleConstr.newTree()
   let values = 
-    if values.kind == nnkBracket and values[0].kind == nnkBracket:
+    if values.kind == nnkBracket and values[0].kind == nnkTupleConstr:
       values[0]
     else:
       values
@@ -516,7 +516,7 @@ proc assertProperty*[A, B](
 
 when isMainModule:
   block:
-    assertProperty("uint32 are >= 0, yes it's silly", uint32Arb(10, 100)) do:
+    assertProperty("uint32 are >= 0, yes it's silly", uint32Arb()) do:
       case a >= 0
       of true: ptPass
       of false: ptFail
@@ -525,13 +525,14 @@ when isMainModule:
    let
      min: uint32 = 100000000
      max = high(uint32)
-   assertProperty(fmt"uint32 within the range[{min}, {max}", uint32Arb(min, max)) do:
+   assertProperty(fmt"uint32 within the range[{min}, {max}]", uint32Arb(min, max)) do:
       case a >= min
       of true: ptPass
       of false: ptFail
 
   block:
-    assertProperty("classic math assumption should fail", [uint32Arb(), uint32Arb()]) do:
+    assertProperty("classic math assumption should fail", (uint32Arb(), uint32Arb(), charArb())) do:
+      assert c is char
       case a + b > a
       of true: ptPass
       of false: ptFail
