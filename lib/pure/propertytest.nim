@@ -413,38 +413,44 @@ proc defaultAssertParams(): AssertParams =
   result = AssertParams(seed: seed, random: newRandom(seed),
                         runsBeforeSuccess: 10)
 
-macro assertProperty*(name: string, values: varargs[typedesc], params = defaultAssertParams(), body: untyped): untyped =
+macro assertProperty*(name: string, values: varargs[typed], params = defaultAssertParams(), body: untyped): untyped =
   ## Generates and runs a property
-  
+  var tupleTyp = nnkTupleConstr.newTree()
+  let values = 
+    if values.kind == nnkBracket and values[0].kind == nnkBracket:
+      values[0]
+    else:
+      values
+    
   let 
     possibleIdents = {'a'..'z'}.toSeq
-    (unpackIdent, value) = block: # Generate the tuple, and the name unpack varaibles
+    idents = block: # Generate the tuple, and the name unpack varaibles
       var
-        val = nnkTupleConstr.newNimNode
         idents: seq[NimNode]
       for i, x in values:
-        val.add x
+        let retT = x[0].getImpl[3][0][1]
         idents.add ident($possibleIdents[i])
-      (idents, val)
-    identDefs = [ident"PTStatus", newIdentDefs(ident"input", value)] # Passing tuple due to property[T]
-  
-  let unpackNode = nnkLetSection.newTree(nnkVarTuple.newTree(unpackIdent)) # make the `let (a, b ...) = input`
+        tupleTyp.add retT
+      idents
+  let unpackNode = nnkLetSection.newTree(nnkVarTuple.newTree(idents)) # make the `let (a, b ...) = input`
   unpackNode[0].add newEmptyNode(), ident"input"
   
   body.insert 0, unpackNode # add unpacking to the first step
 
+
   result = newStmtList()
-  result.add newProc(ident"test", identDefs, body) # Emit the proc
+  result.add newProc(ident"test", [ident"PTStatus", newIdentDefs(ident"input", tupleTyp, newEmptyNode())], body) # Emit the proc
+  let value = ident"uint32"
   result.add quote do:
     var
-      arb = initArbitrary[`value`]()
-      report = startReport[`value`](`name`)
+      arb = initArbitrary[`tupleTyp`]()
+      report = startReport[`tupleTyp`](`name`)
       rng = `params`.random
       p = newProperty(arb, test)
     while report.runId < `params`.runsBeforeSuccess:
       report.startRun()
       let
-        s: Shrinkable[`value`] = p.generate(rng, report.runId)
+        s: Shrinkable[`tupleTyp`] = p.generate(rng, report.runId)
         r: PTStatus = p.run(s.value)
         didSucceed = r notin {ptfail, ptPreCondFail}
       
@@ -452,7 +458,7 @@ macro assertProperty*(name: string, values: varargs[typedesc], params = defaultA
         report.recordFailure(s.value, r)
     echo report
       
-  #echo result.repr
+  echo result.repr
 
 
 
@@ -510,28 +516,22 @@ proc assertProperty*[A, B](
 
 when isMainModule:
   block:
-    assertProperty("uint32 are >= 0, yes it's silly", uint32) do:
+    assertProperty("uint32 are >= 0, yes it's silly", uint32Arb(10, 100)) do:
       case a >= 0
       of true: ptPass
       of false: ptFail
 
-  #block:
-  #  let
-  #    min: uint32 = 100000000
-  #    max = high(uint32)
-  #  echo fmt"uint32 within the range[{min}, {max}]"
-  #  let foo = proc(i: uint32): PTStatus =
-  #              case i >= min
-  #              of true: ptPass
-  #              of false: ptFail
-  #  var arb = uint32Arb(min, max)
-  #  echo assertProperty(arb, foo)
+  block:
+   let
+     min: uint32 = 100000000
+     max = high(uint32)
+   assertProperty(fmt"uint32 within the range[{min}, {max}", uint32Arb(min, max)) do:
+      case a >= min
+      of true: ptPass
+      of false: ptFail
 
   block:
-    echo "classic math assumption should fail"
-    let foo = proc(t: ((uint32, uint32))): PTStatus =
-                let (a, b) = t
-                case a + b > a
-                of true: ptPass
-                of false: ptFail
-    echo assertProperty(uint32Arb(), uint32Arb(), foo)
+    assertProperty("classic math assumption should fail", [uint32Arb(), uint32Arb()]) do:
+      case a + b > a
+      of true: ptPass
+      of false: ptFail
